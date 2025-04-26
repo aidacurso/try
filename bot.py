@@ -265,91 +265,129 @@ def run_discord_bot():
                             except Exception as sort_error:
                                 logger.warning(f"Não foi possível ordenar players: {sort_error}")
                             
-                            # Get each player's name, Steam and Discord IDs
-                            player_list = ""
+                            # Buscar todos os jogadores registrados de uma vez
+                            from keep_alive import app
+                            from models import PlayerInfo
+                            
+                            registered_players = {}
+                            try:
+                                with app.app_context():
+                                    for player in PlayerInfo.query.all():
+                                        registered_players[player.steam_id] = (player.nickname, player.group)
+                            except Exception as db_error:
+                                logger.warning(f"Erro ao buscar informações do banco de dados: {db_error}")
+                            
+                            # Processar jogadores em paralelo
+                            player_list = []
                             for player in players:
-                                # Verificar se player é um dicionário (dict)
                                 if not isinstance(player, dict):
-                                    logger.warning(f"Player não é um dicionário: {type(player)}")
                                     continue
                                 
                                 player_name = player.get('name', 'Unknown')
+                                identifiers = player.get('identifiers', [])
+                                steam_id = next((id for id in identifiers if isinstance(id, str) and id.startswith('steam:')), '')
                                 
-                                # Inicializar IDs
-                                steam_id = ''
-                                discord_id = ''
+                                # Usar informações do cache
+                                if steam_id in registered_players:
+                                    nickname, group = registered_players[steam_id]
+                                    player_info = f"• **{nickname}**"
+                                    if group:
+                                        player_info += f" ({group})"
+                                else:
+                                    player_info = f"• **{player_name}** | Steam: `{steam_id}`"
                                 
-                                # Verificar informações de Steam e Discord quando disponíveis
-                                identifiers = player.get('identifiers', None)
-                                
-                                # Se identifiers é um dicionário
-                                if isinstance(identifiers, dict):
-                                    steam_id = identifiers.get('steam', '')
-                                    discord_id = identifiers.get('discord', '')
-                                
-                                # Se identifiers é uma lista
-                                elif isinstance(identifiers, list):
-                                    for identifier in identifiers:
-                                        if isinstance(identifier, str):
-                                            if identifier.startswith('steam:'):
-                                                steam_id = identifier
-                                            elif identifier.startswith('discord:'):
-                                                discord_id = identifier
-                                
-                                # Preparar informações do jogador
-                                player_info = f"• **{player_name}**"
-                                
-                                # Buscar informação registrada no banco de dados
-                                registered_nickname = None
-                                if steam_id:
-                                    try:
-                                        from keep_alive import app
-                                        from models import PlayerInfo
-                                        
-                                        with app.app_context():
-                                            registered_player = PlayerInfo.query.filter_by(steam_id=steam_id).first()
-                                            if registered_player:
-                                                registered_nickname = registered_player.nickname
-                                                group = registered_player.group
-                                                # Adicionar informações registradas
-                                                player_info += f" | 📋 Registrado: **{registered_nickname}**"
-                                                if group:
-                                                    player_info += f" ({group})"
-                                    except Exception as db_error:
-                                        logger.warning(f"Erro ao buscar informações do banco de dados: {db_error}")
-                                
-                                # Adicionar Discord ID se disponível com formato correto para buscar o usuário
-                                discord_user = None
-                                if discord_id:
-                                    # Normalmente o ID do Discord vem como "discord:123456789012345678"
-                                    # Precisamos extrair apenas os números
-                                    if discord_id.startswith('discord:'):
-                                        clean_discord_id = discord_id.split('discord:')[1]
-                                        try:
-                                            # Tentar buscar o usuário do Discord pelo ID
-                                            discord_user = await client.fetch_user(int(clean_discord_id))
-                                            player_info += f" | Discord: {discord_user.name}"
-                                        except Exception as discord_error:
-                                            logger.warning(f"Não foi possível obter usuário do Discord {clean_discord_id}: {discord_error}")
-                                            player_info += f" | Discord ID: `{clean_discord_id}`"
-                                    else:
-                                        player_info += f" | Discord: `{discord_id}`"
-                                
-                                # Sempre mostrar o Steam ID (independente de Discord)
-                                if steam_id:
-                                    player_info += f" | Steam: `{steam_id}`"
-                                
-                                player_list += player_info + "\n"
+                                player_list.append(player_info)
                             
-                            # Add player list to embed (limit to 1024 chars per field)
-                            if len(player_list) <= 1024:
-                                embed.add_field(name="👥 Online Players", value=player_list, inline=False)
+                            player_list = "\n".join(player_list)
+                            
+                            # Criar dicionário para agrupar jogadores por facção
+                            faction_groups = {
+                                "families": [],
+                                "bennys": [],
+                                "angels": [],
+                                "ballas": [],
+                                "randola": [],
+                                "policia": [],
+                                "vagos": [],
+                                "marabunta": [],
+                                "the lost": [],
+                                "outros": []
+                            }
+
+                            # Distribuir jogadores nos grupos
+                            player_lines = player_list.split('\n')
+                            for player_info in player_lines:
+                                added = False
+                                for faction in faction_groups.keys():
+                                    if faction != "outros" and faction.lower() in player_info.lower():
+                                        faction_groups[faction].append(player_info)
+                                        added = True
+                                        break
+                                if not added:
+                                    faction_groups["outros"].append(player_info)
+
+                            # Criar embeds para cada facção
+                            embeds = []
+                            colors = {
+                                "families": 0x00FF00,  # Verde
+                                "bennys": 0x0000FF,    # Azul
+                                "angels": 0xFFFFFF,    # Branco
+                                "ballas": 0x800080,    # Roxo
+                                "randola": 0xFFA500,   # Laranja
+                                "policia": 0x000080,   # Azul Escuro
+                                "vagos": 0xFFFF00,     # Amarelo
+                                "marabunta": 0x00FFFF, # Ciano
+                                "the lost": 0x808080,  # Cinza
+                                "outros": 0x696969     # Cinza Escuro
+                            }
+
+                            for faction, players in faction_groups.items():
+                                if players:  # Só criar embed se tiver jogadores
+                                    new_embed = discord.Embed(
+                                        title=f"{server_name} - {faction.upper()}",
+                                        color=colors[faction]
+                                    )
+                                    new_embed.description = f"**{players_count}/{max_players}** players online"
+                                    
+                                    # Dividir em chunks se necessário
+                                    chunks = []
+                                    current_chunk = []
+                                    current_length = 0
+                                    
+                                    for player in players:
+                                        if current_length + len(player) + 1 > 1000:
+                                            chunks.append(current_chunk)
+                                            current_chunk = [player]
+                                            current_length = len(player)
+                                        else:
+                                            current_chunk.append(player)
+                                            current_length += len(player) + 1
+                                    
+                                    if current_chunk:
+                                        chunks.append(current_chunk)
+                                    
+                                    for i, chunk in enumerate(chunks):
+                                        if i > 0:  # Se precisar de mais de um embed para a mesma facção
+                                            new_embed = discord.Embed(
+                                                title=f"{server_name} - {faction.upper()} (Cont.)",
+                                                color=colors[faction]
+                                            )
+                                        new_embed.add_field(
+                                            name=f"👥 {faction.upper()} Players",
+                                            value='\n'.join(chunk),
+                                            inline=False
+                                        )
+                                        embeds.append(new_embed)
+                            
+                            # Todos os chunks já foram processados no loop anterior
+                            
+                            # Send all embeds
+                            if embeds:
+                                for e in embeds:
+                                    await message.channel.send(embed=e)
+                                return
                             else:
-                                # Split into multiple fields if needed
-                                chunks = [player_list[i:i+1024] for i in range(0, len(player_list), 1024)]
-                                for i, chunk in enumerate(chunks):
-                                    embed.add_field(name=f"👥 Online Players ({i+1}/{len(chunks)})", 
-                                                  value=chunk, inline=False)
+                                embed.add_field(name="👥 Online Players", value="No players online", inline=False)
                         else:
                             embed.add_field(name="🔍 Server Status", 
                                           value="No players online at the moment.", inline=False)
